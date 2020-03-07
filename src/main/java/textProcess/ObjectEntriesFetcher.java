@@ -17,9 +17,13 @@ import java.io.*;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
+import java.util.Comparator;
+import java.util.Iterator;
 import java.util.Properties;
+import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 该工具类用来从journalcontent中抓取指定object的update
@@ -28,124 +32,194 @@ public class ObjectEntriesFetcher {
 
     private final static String configFile = "ObjectEntriessFetcherProperties.properties";
     private final static Properties properties = new Properties();
-    static{
+    static {
         try {
             properties.load(new InputStreamReader(new FileInputStream(
-                    System.getProperty("user.dir")+File.separator+configFile),"utf-8"));
+                    System.getProperty("user.dir") + File.separator + configFile), "utf-8"));
         } catch (Exception e) {
             try {
-                properties.load(new InputStreamReader(ClassLoader.getSystemResourceAsStream(configFile),"utf-8"));
+                properties.load(new InputStreamReader(ClassLoader.getSystemResourceAsStream(configFile), "utf-8"));
             } catch (IOException ex) {
                 ex.printStackTrace();
             }
         }
     }
-    private final static String limit = properties.getProperty("limit");
-    /**
-     * 根据journal_region和object的创建的时间确定起始major（remote zone上保留了所有journal）,
-     * http://10.243.20.15:9101/diagnostic/PR/1/DumpAllKeys/DIRECTORYTABLE_RECORD?type=JOURNAL_REGION&
-     * dtId=urn:storageos:OwnershipInfo:14b16fde-87fb-49af-9b32-b1e9b9cb4ac6_9f42ace9-30ba-455e-af4c-1b4c4ed86584_OB_53_128_0:&
-     * zone=urn:storageos:VirtualDataCenterData:0bdc3dc6-4af9-4578-a89f-48b8e1e9d2bd&showvalue=gpb
-     */
-    private static int major = Integer.parseInt(properties.getProperty("major_start"), 16);
-    /**
-     * 允许major自增几次
-     */
-    private static int majorCount = Integer.parseInt(properties.getProperty("major_end"), 16) - major;
-    private static String token = "0-0";
-    private final static String target = properties.getProperty("target");
-    private static String baseUrl = properties.getProperty("baseUrl");
-    static CloseableHttpClient client = HttpClients.createDefault();
-    static RequestConfig requestConfig = RequestConfig.custom().setConnectTimeout(300000).setRedirectsEnabled(true)
-            .setConnectionRequestTimeout(300000).setSocketTimeout(300000).build();
-    static private String outputDir = properties.getProperty("outputDir");
-    static private ExecutorService executor = Executors.newCachedThreadPool();
-    static private PerformanceCounter requetCounter = new PerformanceCounter("requetCounter");
-    static private PerformanceCounter saveOriginCounter = new PerformanceCounter("saveOriginCounter");
-    static private PerformanceCounter parseCounter = new PerformanceCounter("paseCounter");
 
-    public static void main(String[] args) throws InterruptedException, IOException {
+    private final static String limit = properties.getProperty("limit");
+    private static int majorStart = Integer.parseInt(properties.getProperty("major_start"), 16);
+    private static int majorEnd = Integer.parseInt(properties.getProperty("major_end"), 16);
+    private final static String[] targets = properties.getProperty("targets").split(",");
+    private static String baseUrl = properties.getProperty("baseUrl");
+    private static CloseableHttpClient client = HttpClients.createDefault();
+    private static RequestConfig requestConfig = RequestConfig.custom().setConnectTimeout(300000).setRedirectsEnabled(true)
+            .setConnectionRequestTimeout(300000).setSocketTimeout(300000).build();
+    private static String outputDir = properties.getProperty("outputDir");
+    private static ExecutorService requestPool = Executors.newFixedThreadPool(
+            Integer.parseInt(properties.getProperty("threadPoolSize")));
+    private static ExecutorService parserPool = Executors.newCachedThreadPool();
+    private static AtomicInteger currentTaskNum = new AtomicInteger(0);
+    private static TreeSet<String> tempFileSet = new TreeSet(new FileComparator());
+
+    private static PerformanceCounter requetCounter = new PerformanceCounter("requetCounter");
+    private static PerformanceCounter saveOriginCounter = new PerformanceCounter("saveOriginCounter");
+    private static PerformanceCounter parseCounter = new PerformanceCounter("paseCounter");
+    private static PerformanceCounter mergeCounter = new PerformanceCounter("mergeCounter");
+
+    public static void main(String[] args) throws Exception{
+        long start = System.currentTimeMillis();
+        prepare();
+        for (int major = majorStart; major <= majorEnd; major++) {
+            requestPool.execute(new RequestTask(major, "0-0"));
+        }
+        while(currentTaskNum.get() > 0){
+            Thread.sleep(10000);
+        }
+        requestPool.shutdown();
+        parserPool.shutdown();
+        PerformanceCounter.StartTime beforeMerge = PerformanceCounter.start();
+        mergeFile();
+        mergeCounter.count(beforeMerge);
+        PerformanceCounter.printAll();
+        System.out.println("Finished with totalTime:" + (System.currentTimeMillis() - start) + "ms");
+    }
+
+    static void prepare() throws Exception {
         System.out.println("===========================");
-        System.out.printf("major:%s\n", major);
-        System.out.printf("majorCount:%s\n", majorCount);
-        System.out.printf("target:%s\n", target);
+        System.out.printf("majorStart:%s\n", majorStart);
+        System.out.printf("majorEnd:%s\n", majorEnd);
+        System.out.printf("targets:%s\n", targets);
         System.out.println("===========================");
         File file = new File(outputDir);
         boolean prepare = true;
-        if(file.isDirectory()){
+        if (file.isDirectory()) {
             String newDirName = outputDir + System.currentTimeMillis();
             prepare &= file.renameTo(new File(newDirName));
-            if(prepare){
+            if (prepare) {
                 System.out.println("rename existing dir " + outputDir + " to " + newDirName);
-            }else{
+            } else {
                 throw new IOException("Unable rename existing dir " + outputDir);
             }
         }
         prepare &= file.mkdir();
-        prepare &= new File(outputDir+File.separator+"origin").mkdir();
-        if(!prepare){
+        prepare &= new File(outputDir + File.separator + "origin").mkdir();
+        if (!prepare) {
             throw new RuntimeException("Unable to prepare dir" + outputDir);
         }
-        // TODO 改为任务队列实现并发执行，将执行结果按major-token 来排序
-        long start = System.currentTimeMillis();
-        while(token != null){
+    }
+
+    static void mergeFile() throws FileNotFoundException, IOException {
+        String originDir = outputDir + File.separator;
+        String allLog = outputDir + File.separator + "all.log";
+        String targetLog = outputDir + File.separator + "target.log";
+        FileChannel allLogChannel = new FileOutputStream(allLog).getChannel();
+        FileChannel targetLogChannel = new FileOutputStream(targetLog).getChannel();
+        try{
+            allLogChannel = new FileOutputStream(allLog).getChannel();
+            targetLogChannel = new FileOutputStream(targetLog).getChannel();
+            Iterator<String> iterator = tempFileSet.iterator();
+            while(iterator.hasNext()) {
+                String fileName = iterator.next();
+                FileChannel originalAllLogChannel = null;
+                FileChannel originalTargetLogChannel = null;
+                try{
+                    File originalAllLogFile = new File(originDir + fileName);
+                    File originalTargetLogFile = new File(outputDir + fileName);
+                    if(originalAllLogFile.exists()){
+                        originalAllLogChannel = new FileInputStream(originalAllLogFile).getChannel();
+                        allLogChannel.transferFrom(originalAllLogChannel, 0, Long.MAX_VALUE);
+                        allLogChannel.position(allLogChannel.size());
+                        originalAllLogFile.delete();
+                    }
+                    if(originalTargetLogFile.exists()){
+                        originalTargetLogChannel = new FileInputStream(originalTargetLogFile).getChannel();
+                        targetLogChannel.transferFrom(originalTargetLogChannel, 0, Long.MAX_VALUE);
+                        targetLogChannel.position(targetLogChannel.size());
+                        originalTargetLogFile.delete();
+                    }
+                } finally{
+                    if(originalAllLogChannel != null){
+                        originalAllLogChannel.close();
+                    }
+                    if(originalTargetLogChannel != null){
+                        originalTargetLogChannel.close();
+                    }
+                }
+            }
+            new File(originDir).delete();
+        } finally{
+            allLogChannel.close();
+            targetLogChannel.close();
+        }
+    }
+
+    static class RequestTask implements Runnable {
+        private final String token;
+        private final int major;
+
+        RequestTask(int major, String token) {
+            currentTaskNum.incrementAndGet();
+            this.major = major;
+            this.token = token;
+        }
+
+        @Override
+        public void run() {
+            boolean success = false;
             PerformanceCounter.StartTime beforeRequest =
                     PerformanceCounter.start();
             String url = UrlBuilder.getBuilder(baseUrl)
-                    .appendParam("major", String.format("%016x",major))
+                    .appendParam("major", String.format("%016x", major))
                     .appendParam("limit", limit + "")
                     .appendParam("token", token)
                     .build();
             HttpGet httpGet = new HttpGet(url);
             httpGet.setConfig(requestConfig);
             try {
-                client.execute(httpGet, rep -> {
-                    System.out.println(url);
-                    requetCounter.count(beforeRequest);
-                    if (rep.getStatusLine().getStatusCode() >= 300) {
-                        System.out.println(rep.getStatusLine().getStatusCode() + " - Error url:" + url);
-                    } else {
-                        ReadableByteChannel readableChannel = null;
-                        FileChannel originChannal = null;
-                        try {
-                            PerformanceCounter.StartTime beforeSave =
-                                    PerformanceCounter.start();
-                            readableChannel = Channels.newChannel(rep.getEntity().getContent());
-                            String originFile = outputDir+File.separator+"origin"+File.separator
-                                    +major+"-"+token+".log";
-                            originChannal  = new FileOutputStream(originFile).getChannel();
-                            originChannal.transferFrom(readableChannel, 0, Long.MAX_VALUE);
-                            originChannal.force(true);
-                            saveOriginCounter.count(beforeSave);
-                            BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(originFile)));
-                            String line = reader.readLine();
-                            if (line.contains("token to use for next set of entries: ")) {
-                                token = line.split("<")[0].split(": ")[1];
-                            } else if (majorCount-- > 0) {
-                                major++;
-                                token = "0-0";
-                            } else {
-                                token = null;
+                while(!success){
+                    success = client.execute(httpGet, rep -> {
+                        System.out.println(url);
+                        requetCounter.count(beforeRequest);
+                        if (rep.getStatusLine().getStatusCode() >= 300) {
+                            System.out.println(rep.getStatusLine().getStatusCode() + " - Error url:" + url);
+                        } else {
+                            ReadableByteChannel readableChannel = null;
+                            FileChannel originChannal = null;
+                            try {
+                                PerformanceCounter.StartTime beforeSave =
+                                        PerformanceCounter.start();
+                                readableChannel = Channels.newChannel(rep.getEntity().getContent());
+                                String fileName = major + "-" + token;
+                                tempFileSet.add(fileName);
+                                String originFile = outputDir + File.separator + "origin" + File.separator + fileName;
+                                originChannal = new FileOutputStream(originFile).getChannel();
+                                originChannal.transferFrom(readableChannel, 0, Long.MAX_VALUE);
+                                originChannal.force(true);
+                                saveOriginCounter.count(beforeSave);
+                                BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(originFile)));
+                                String line = reader.readLine();
+                                if (line.contains("token to use for next set of entries: ")) {
+                                    String nextToken = line.split("<")[0].split(": ")[1];
+                                    requestPool.execute(new RequestTask(major, nextToken));
+                                }
+                                FileOutputStream fos = new FileOutputStream(outputDir + File.separator + fileName);
+                                PrintStream ps = new PrintStream(fos);
+                                parserPool.execute(new ParseTask(reader, ps));
+                            } catch (FileNotFoundException e) {
+                                e.printStackTrace();
+                            } finally {
+                                readableChannel.close();
+                                originChannal.close();
                             }
-                            FileOutputStream fos = new FileOutputStream(outputDir+File.separator+
-                                    +major+"-"+token+".log");
-                            PrintStream ps = new PrintStream(fos);
-                            executor.execute(new ParseTask(reader, ps));
-                        } catch (FileNotFoundException e) {
-                            e.printStackTrace();
-                        }finally{
-                            readableChannel.close();
-                            originChannal.close();
                         }
-                    }
-                    return null;
-                });
+                        return true;
+                    });
+                }
             } catch (IOException e) {
                 e.printStackTrace();
+            } finally{
+                currentTaskNum.decrementAndGet();
             }
         }
-        System.out.println("total:" + (System.currentTimeMillis() - start));
-        PerformanceCounter.printAll();
     }
 
     static class ParseTask implements Runnable {
@@ -153,6 +227,7 @@ public class ObjectEntriesFetcher {
         private PrintStream ps;
 
         ParseTask(BufferedReader reader, PrintStream ps) {
+            currentTaskNum.incrementAndGet();
             this.reader = reader;
             this.ps = ps;
         }
@@ -160,7 +235,7 @@ public class ObjectEntriesFetcher {
         @Override
         public void run() {
             PerformanceCounter.StartTime beforeParse =
-                    PerformanceCounter.start();
+                PerformanceCounter.start();
             try {
                 StAXXmlParser.parse(reader, eventReader -> {
                     boolean needRecord = false;
@@ -179,8 +254,8 @@ public class ObjectEntriesFetcher {
                             case XMLStreamConstants.START_ELEMENT:
                                 StartElement startElement = event.asStartElement();
                                 currentQName = startElement.getName().getLocalPart();
-                                if("writeType".equals(currentQName)){
-                                    if(needRecord){
+                                if ("writeType".equals(currentQName)) {
+                                    if (needRecord) {
                                         ps.print(sb.toString());
                                     }
                                     needRecord = false;
@@ -194,9 +269,18 @@ public class ObjectEntriesFetcher {
                                 Characters characters = event.asCharacters();
                                 String text = characters.getData();
                                 sb.append(text);
-                                if(!needRecord){
-                                    needRecord = "schemaKey".equals(currentQName) &&
-                                            !text.isEmpty() && text.contains(target);
+                                if (!needRecord) {
+                                    needRecord = "schemaKey".equals(currentQName) && !text.isEmpty();
+                                    if (needRecord) {
+                                        boolean hasTarget = false;
+                                        for (String target : targets) {
+                                            if (text.contains(target.trim())) {
+                                                hasTarget = true;
+                                                break;
+                                            }
+                                        }
+                                        needRecord = hasTarget;
+                                    }
                                 }
                                 break;
                             case XMLStreamConstants.END_ELEMENT:
@@ -208,11 +292,35 @@ public class ObjectEntriesFetcher {
                         }
                     }
                 });
-            } catch(Exception e){
+            } catch (Exception e) {
                 e.printStackTrace();
-            } finally{
+            } finally {
+                ps.close();
+                try {
+                    reader.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
                 parseCounter.count(beforeParse);
+                currentTaskNum.decrementAndGet();
             }
+        }
+    }
+
+    static class FileComparator implements Comparator<String> {
+
+        @Override
+        public int compare(String thisFile, String otherFile) {
+            String[] thisFileNums = thisFile.split("-");
+            String[] otherFileNums = otherFile.split("-");
+            for(int i = 0; i < 3; i++){
+                int thisNumber = Integer.parseInt(thisFileNums[i]);
+                int otherNumber = Integer.parseInt(otherFileNums[i]);
+                if(thisNumber != otherNumber){
+                    return thisNumber - otherNumber;
+                }
+            }
+            return 0;
         }
     }
 }

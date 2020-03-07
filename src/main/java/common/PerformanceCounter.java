@@ -23,7 +23,7 @@ public class PerformanceCounter {
     }
 
     public void count(StartTime start){
-        long delta = System.nanoTime() - start.start;
+        long delta = System.currentTimeMillis() - start.start;
         total.getAndAdd(delta);
         count.incrementAndGet();
         min.updateAndGet(pre -> Math.min(pre, delta));
@@ -37,7 +37,7 @@ public class PerformanceCounter {
     }
 
     public synchronized void print(){
-        System.out.printf("%s [avg:%s, min:%s, max:%s, total:%s, count:%s]\n",
+        System.out.printf("%s [avg:%sms, min:%sms, max:%sms, total:%sms, count:%s]\n",
                 name, count.get() == 0 ? 0 : total.get()/count.get(),
                 min.get(), max.get(), total.get(), count.get());
     }
@@ -49,7 +49,7 @@ public class PerformanceCounter {
     public static class StartTime {
         long start;
         StartTime(){
-            start = System.nanoTime();
+            start = System.currentTimeMillis();
         }
     }
 }
