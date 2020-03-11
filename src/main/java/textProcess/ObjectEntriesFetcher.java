@@ -1,5 +1,6 @@
 package textProcess;
 
+import common.FileUtils;
 import common.PerformanceCounter;
 import common.StAXXmlParser;
 import common.UrlBuilder;
@@ -14,6 +15,7 @@ import javax.xml.stream.events.Characters;
 import javax.xml.stream.events.StartElement;
 import javax.xml.stream.events.XMLEvent;
 import java.io.*;
+import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
@@ -59,6 +61,7 @@ public class ObjectEntriesFetcher {
     private static ExecutorService parserPool = Executors.newCachedThreadPool();
     private static AtomicInteger currentTaskNum = new AtomicInteger(0);
     private static TreeSet<String> tempFileSet = new TreeSet(new FileComparator());
+    private static final Object fileSetLock = new Object();
 
     private static PerformanceCounter requetCounter = new PerformanceCounter("requetCounter");
     private static PerformanceCounter saveOriginCounter = new PerformanceCounter("saveOriginCounter");
@@ -107,47 +110,31 @@ public class ObjectEntriesFetcher {
         }
     }
 
-    static void mergeFile() throws FileNotFoundException, IOException {
-        String originDir = outputDir + File.separator;
-        String allLog = outputDir + File.separator + "all.log";
+    static void mergeFile() throws IOException {
         String targetLog = outputDir + File.separator + "target.log";
-        FileChannel allLogChannel = new FileOutputStream(allLog).getChannel();
         FileChannel targetLogChannel = new FileOutputStream(targetLog).getChannel();
         try{
-            allLogChannel = new FileOutputStream(allLog).getChannel();
             targetLogChannel = new FileOutputStream(targetLog).getChannel();
             Iterator<String> iterator = tempFileSet.iterator();
             while(iterator.hasNext()) {
                 String fileName = iterator.next();
-                FileChannel originalAllLogChannel = null;
                 FileChannel originalTargetLogChannel = null;
                 try{
-                    File originalAllLogFile = new File(originDir + fileName);
-                    File originalTargetLogFile = new File(outputDir + fileName);
-                    if(originalAllLogFile.exists()){
-                        originalAllLogChannel = new FileInputStream(originalAllLogFile).getChannel();
-                        allLogChannel.transferFrom(originalAllLogChannel, 0, Long.MAX_VALUE);
-                        allLogChannel.position(allLogChannel.size());
-                        originalAllLogFile.delete();
-                    }
+                    File originalTargetLogFile = new File(outputDir + File.separator + fileName);
                     if(originalTargetLogFile.exists()){
                         originalTargetLogChannel = new FileInputStream(originalTargetLogFile).getChannel();
-                        targetLogChannel.transferFrom(originalTargetLogChannel, 0, Long.MAX_VALUE);
-                        targetLogChannel.position(targetLogChannel.size());
+                        FileUtils.transferAll(originalTargetLogChannel, targetLogChannel);
+                        System.out.println("merge " + outputDir + File.separator + fileName + " to target.log");
                         originalTargetLogFile.delete();
                     }
                 } finally{
-                    if(originalAllLogChannel != null){
-                        originalAllLogChannel.close();
-                    }
                     if(originalTargetLogChannel != null){
+                        originalTargetLogChannel.force(false);
                         originalTargetLogChannel.close();
                     }
                 }
             }
-            new File(originDir).delete();
         } finally{
-            allLogChannel.close();
             targetLogChannel.close();
         }
     }
@@ -189,11 +176,18 @@ public class ObjectEntriesFetcher {
                                         PerformanceCounter.start();
                                 readableChannel = Channels.newChannel(rep.getEntity().getContent());
                                 String fileName = major + "-" + token;
-                                tempFileSet.add(fileName);
+                                synchronized(fileSetLock){
+                                    tempFileSet.add(fileName);
+                                }
                                 String originFile = outputDir + File.separator + "origin" + File.separator + fileName;
-                                originChannal = new FileOutputStream(originFile).getChannel();
-                                originChannal.transferFrom(readableChannel, 0, Long.MAX_VALUE);
-                                originChannal.force(true);
+                                originChannal = new FileOutputStream(originFile, true).getChannel();
+                                ByteBuffer buffer = ByteBuffer.allocateDirect(10240);
+                                while (readableChannel.read(buffer) != -1) {
+                                    buffer.flip();
+                                    originChannal.write(buffer);
+                                    buffer.clear();
+                                }
+                                originChannal.force(false);
                                 saveOriginCounter.count(beforeSave);
                                 BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(originFile)));
                                 String line = reader.readLine();
@@ -295,6 +289,7 @@ public class ObjectEntriesFetcher {
             } catch (Exception e) {
                 e.printStackTrace();
             } finally {
+                ps.flush();
                 ps.close();
                 try {
                     reader.close();
