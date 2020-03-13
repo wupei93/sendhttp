@@ -2,10 +2,7 @@ package common;
 
 import com.jcraft.jsch.*;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.*;
 
 public class SshUtils {
     private final static String DEFAULT_USERNAME = "admin";
@@ -35,7 +32,7 @@ public class SshUtils {
         config.put("StrictHostKeyChecking", "no");
         session.setConfig(config);
         try {
-            session.connect(30000);
+            session.connect(500);
         } catch (Exception e) {
             throw new Exception("连接远程端口无效或用户名密码错误");
         }
@@ -59,18 +56,10 @@ public class SshUtils {
             */
             channel = session.openChannel("exec");
             ((ChannelExec) channel).setCommand(command);
-
-            //channel.setInputStream(null);
-            ((ChannelExec) channel).setErrStream(System.out);
-
             channel.connect();
-            InputStream in = channel.getExtInputStream();
-            reader = new BufferedReader(new InputStreamReader(in));
-            reader.lines().forEach(System.out::println);
-            String line = null;
-            while ((line = reader.readLine())!= null){
-                System.out.println(line);
-            }
+            InputStream in = channel.getInputStream();
+            byte[] buffer = IoUtils.readAllAndClose(in);
+            reader = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(buffer)));
         } catch (IOException e) {
             e.printStackTrace();
         } catch (JSchException e) {
