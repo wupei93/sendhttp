@@ -47,6 +47,7 @@ public class ObjectEntriesFetcher {
         }
     }
 
+    private final static boolean onlyGrepSchemaKey = Boolean.parseBoolean(properties.getProperty("onlyGrepSchemaKey"));
     private final static String limit = properties.getProperty("limit");
     private static int majorStart = Integer.parseInt(properties.getProperty("major_start"), 16);
     private static int majorEnd = Integer.parseInt(properties.getProperty("major_end"), 16);
@@ -264,7 +265,7 @@ public class ObjectEntriesFetcher {
                                 String text = characters.getData();
                                 sb.append(text);
                                 if (!needRecord) {
-                                    needRecord = "schemaKey".equals(currentQName) && !text.isEmpty();
+                                    needRecord = (!onlyGrepSchemaKey || "schemaKey".equals(currentQName)) && !text.isEmpty();
                                     if (needRecord) {
                                         boolean hasTarget = false;
                                         for (String target : targets) {
