@@ -5,21 +5,33 @@ import common.SshUtils;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
-import java.util.Arrays;
-import java.util.List;
-import java.util.concurrent.*;
+import java.util.*;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class WSCriticalChunkMaybe {
-    private static ExecutorService executorService = Executors.newFixedThreadPool(10);
+    private static ExecutorService executorService = Executors.newFixedThreadPool(100);
     //private static List<String> hostList = Arrays.asList("10.243.20.15","10.243.20.55","10.243.20.95");
     private static List<String> hostList = Arrays.asList("10.243.81.81","10.243.81.101","10.243.81.121");
     public static void main(String[] args) throws Exception {
-        hostList.forEach(host -> {
+        hostList.parallelStream().forEach(host -> {
             Channel channel = null;
             try {
+                Set<String> targetChunkSet = new HashSet<>();
+                channel = SshUtils.execCmd(host,
+                        "curl -L 'http://"+host+":9101/diagnostic/CT/1/DumpAllKeys/CHUNK_GC_SCAN_STATUS_TASK' ");
+                BufferedReader reader = new BufferedReader(new InputStreamReader(channel.getInputStream()));
+                reader.lines().forEach( line -> {
+                    String[] strings = line.split(" ");
+                    if(strings.length == 10 && Long.parseLong(strings[7]) >= 1586534400000L ){
+                        targetChunkSet.add(strings[9]);
+                    }
+                });
+                disconnect(channel);
                 channel = SshUtils.execCmd(host,
                         "svc_log -f 'ERROR  RepoChunkScanBatchItemProcessor.java.*FAILED GC VERIFICATION on old task ' -files blobsvc-error.log* ");
-                BufferedReader reader = new BufferedReader(new InputStreamReader(channel.getInputStream()));
+                reader = new BufferedReader(new InputStreamReader(channel.getInputStream()));
                 reader.lines().forEach( line -> {
                     int chunkIdIndex = line.indexOf("chunk");
                     if(chunkIdIndex == -1){
@@ -28,12 +40,14 @@ public class WSCriticalChunkMaybe {
                     int objectIdIndex = line.indexOf("objectId");
                     String chunkId = line.substring(chunkIdIndex).split(" ")[1];
                     String objectId = line.substring(objectIdIndex).split(" ")[1];
-                    executorService.submit(new CheckChunkAndObjectTask(chunkId, objectId));
+                    if(targetChunkSet.contains(chunkId)){
+                        executorService.submit(new CheckChunkAndObjectTask(chunkId, objectId));
+                    }
                 });
             } catch (Exception e) {
                 e.printStackTrace();
             } finally{
-                channel.disconnect();
+                disconnect(channel);
             }
         });
     }
@@ -78,7 +92,7 @@ public class WSCriticalChunkMaybe {
                                 } catch (Exception e) {
                                     e.printStackTrace();
                                 } finally{
-                                    ch.disconnect();
+                                    disconnect(ch);
                                 }
                             }
                         }
@@ -86,13 +100,17 @@ public class WSCriticalChunkMaybe {
                 } catch (Exception e) {
                     e.printStackTrace();
                 } finally{
-                    if(channel != null){
-                        channel.disconnect();
-                    }
+                    disconnect(channel);
                 }
             });
             return null;
         }
 
+    }
+
+    public static void disconnect(Channel channel){
+        if(channel != null){
+            channel.disconnect();
+        }
     }
 }
