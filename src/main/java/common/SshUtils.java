@@ -55,7 +55,7 @@ public class SshUtils {
     public static Channel execCmd(String host, String command) throws Exception {
         Session session = getConnection(host);
         command += "\n";
-        System.out.println("执行命令：" + command);
+        //System.out.println("执行命令：" + command);
         ChannelExec channel = null;
         try {
             /** 可选
