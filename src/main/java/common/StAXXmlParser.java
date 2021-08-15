@@ -3,7 +3,6 @@ package common;
 import javax.xml.stream.XMLEventReader;
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamException;
-import javax.xml.stream.events.XMLEvent;
 import java.io.Reader;
 
 public class StAXXmlParser {

@@ -1,19 +1,35 @@
 package findbug;
 
 import com.jcraft.jsch.Channel;
+import common.NamedThreadFactory;
 import common.SshUtils;
+import org.apache.commons.lang3.StringUtils;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.util.*;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.io.*;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.*;
 
 public class WSCriticalChunkMaybe {
-    private static ExecutorService executorService = Executors.newFixedThreadPool(100);
-    //private static List<String> hostList = Arrays.asList("10.243.20.15","10.243.20.55","10.243.20.95");
-    private static List<String> hostList = Arrays.asList("10.243.81.81","10.243.81.101","10.243.81.121");
+    private static ExecutorService executorService = new ThreadPoolExecutor(10, 10,
+            60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<Runnable>(),
+            NamedThreadFactory.create(WSCriticalChunkMaybe.class));
+    private static List<String> hostList = Arrays.asList("10.243.20.15","10.243.20.55","10.243.20.95");
+    //private static List<String> hostList = Arrays.asList("10.243.81.81","10.243.81.101","10.243.81.121");
+    private static File output;
+    private static BufferedWriter outputWriter;
+    static {
+        try {
+            output = File.createTempFile("findbug", System.currentTimeMillis()+"");
+            outputWriter = new BufferedWriter(new FileWriter(output));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         hostList.parallelStream().forEach(host -> {
             Channel channel = null;
@@ -24,7 +40,8 @@ public class WSCriticalChunkMaybe {
                 BufferedReader reader = new BufferedReader(new InputStreamReader(channel.getInputStream()));
                 reader.lines().forEach( line -> {
                     String[] strings = line.split(" ");
-                    if(strings.length == 10 && Long.parseLong(strings[7]) >= 1586534400000L ){
+                    if(strings.length == 10 && StringUtils.isNotEmpty(strings[7])
+                            && Long.parseLong(strings[7]) >= 1586534400000L ){
                         targetChunkSet.add(strings[9]);
                     }
                 });
@@ -50,6 +67,12 @@ public class WSCriticalChunkMaybe {
                 disconnect(channel);
             }
         });
+        while(((ThreadPoolExecutor)executorService).getActiveCount()> 0){
+            Thread.sleep(60000);
+        }
+        Thread.sleep(60000);
+        executorService.shutdown();
+        System.out.println("Finished");
     }
 
     static class CheckChunkAndObjectTask implements Callable{
@@ -88,6 +111,9 @@ public class WSCriticalChunkMaybe {
                                     String timestamp = new BufferedReader(new InputStreamReader(ch.getInputStream())).readLine().split("\"")[1];
                                     if(Long.parseLong(timestamp) >= 1585958400000L){
                                         System.out.println("ERROR: maybe miss cross rr");
+                                        if(output.exists()){
+                                            outputWriter.write(this + "\n");
+                                        }
                                     }
                                 } catch (Exception e) {
                                     e.printStackTrace();
@@ -106,6 +132,10 @@ public class WSCriticalChunkMaybe {
             return null;
         }
 
+        @Override
+        public String toString(){
+            return "chunkId:" + chunkId + " - objectId:" + objectId;
+        }
     }
 
     public static void disconnect(Channel channel){

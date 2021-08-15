@@ -30,6 +30,16 @@ public class JschTest {
         in.close();
         extIn.close();
         out.close();
+    }
 
+    @Test
+    public void testLocal(){
+        ThreadLocal<Boolean> testLocal = new ThreadLocal<>();
+        testLocal.set(true);
+        if(Boolean.TRUE == testLocal.get()){
+            System.out.println("hh");
+        }else{
+            System.out.println(testLocal);
+        }
     }
 }
