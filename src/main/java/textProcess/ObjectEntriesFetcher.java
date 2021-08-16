@@ -3,6 +3,7 @@ package textProcess;
 import common.FileUtils;
 import common.PerformanceCounter;
 import common.UrlBuilder;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.ClientProtocolException;
 import org.apache.http.client.ResponseHandler;
@@ -84,7 +85,7 @@ public class ObjectEntriesFetcher {
         System.out.printf("host:%s\n", host);
         prepare();
         if(majorStart == -1 || majorEnd == -1){
-            System.out.println("can't find JOURNAL_REGION from " + properties.getProperty("startTime") + " to " + properties.getProperty("stopTime"));
+            System.out.println("Finished: can't find JOURNAL_REGION from " + properties.getProperty("startTime") + " to " + properties.getProperty("stopTime"));
             return;
         }
         System.out.printf("majorStart:%s\n", majorStart);
@@ -147,22 +148,26 @@ public class ObjectEntriesFetcher {
         }
 
         String target = targets.split(",")[0].trim();
-        TargetType targetType = OBJECT_ID;
-        if(target.contains("-")){
-            targetType = CHUNK_ID;
-        }
 
         // get dtId
-        if(targetType.equals(CHUNK_ID)){
-            httpGet = buildHttpGet("diagnostic/RR/0/DumpAllKeys/REPO_REFERENCE?showvalue=gpb&chunkId=" + target);
-        } else {
-            httpGet = buildHttpGet("diagnostic/OB/0/DumpAllKeys/OBJECT_TABLE_KEY?showvalue=gpb&objectId=" + target);
+        String dtId = properties.getProperty("dtId");
+        if(StringUtils.isEmpty(dtId)){
+            TargetType targetType = OBJECT_ID;
+            if(target.contains("-")){
+                targetType = CHUNK_ID;
+            }
+            if(targetType.equals(CHUNK_ID)){
+                httpGet = buildHttpGet("diagnostic/RR/0/DumpAllKeys/REPO_REFERENCE?showvalue=gpb&chunkId=" + target);
+            } else {
+                httpGet = buildHttpGet("diagnostic/OB/0/DumpAllKeys/OBJECT_TABLE_KEY?showvalue=gpb&objectId=" + target);
+            }
+            String url = findUrl(httpGet);
+            if(url == null){
+                return;
+            }
+            dtId = url.split(urlPrefix.split(":")[2])[1].split("/")[0];
         }
-        String url = findUrl(httpGet);
-        if(url == null){
-            return;
-        }
-        String dtId = url.split(urlPrefix.split(":")[2])[1].split("/")[0];
+        dtId = dtId.trim();
 
         // get zone
         httpGet = buildHttpGet("diagnostic/getVdcFromNode?nodeId=" + host);
@@ -260,6 +265,7 @@ public class ObjectEntriesFetcher {
             }
         } finally{
             targetLogChannel.close();
+            new File(outputDir + File.separator + "origin").delete();
         }
     }
 

@@ -5,7 +5,7 @@
 
     <groupId>tool</groupId>
     <artifactId>send-http</artifactId>
-    <version>2.0</version>
+    <version>3.0</version>
 
     <dependencies>
         <!-- https://mvnrepository.com/artifact/com.jcraft/jsch -->
@@ -48,8 +48,30 @@
 
     <build>
         <plugins>
+            <!--java编译打包插件-->
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.1</version>
+                <configuration>
+                    <source>1.8</source>
+                    <target>1.8</target>
+                    <encoding>UTF-8</encoding>
+                </configuration>
+                <executions>
+                    <execution>
+                        <phase>compile</phase>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-assembly-plugin</artifactId>
+                <version>2.3</version>
                 <configuration>
                     <appendAssemblyId>false</appendAssemblyId>
                     <descriptorRefs>
@@ -57,22 +79,22 @@
                     </descriptorRefs>
                     <archive>
                         <manifest>
-                            <addClasspath>true</addClasspath>
-                            <classpathPrefix>lib/</classpathPrefix>
                             <mainClass>textProcess.ObjectEntriesFetcher</mainClass>
                         </manifest>
                     </archive>
                 </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <configuration>
-                    <source>8</source>
-                    <target>8</target>
-                </configuration>
+                <executions>
+                    <execution>
+                        <id>make-assembly</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>assembly</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
+
         <resources>
             <resource>
                 <directory>src/main/java</directory>

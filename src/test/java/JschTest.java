@@ -2,6 +2,7 @@ import com.jcraft.jsch.ChannelExec;
 import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.JSchException;
 import com.jcraft.jsch.Session;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.io.*;
@@ -9,6 +10,7 @@ import java.io.*;
 public class JschTest {
 
     @Test
+    @Ignore
     public void testJsch() throws JSchException, IOException {
         JSch jsch=new JSch();
         Session session = jsch.getSession("admin", "10.243.20.15");
