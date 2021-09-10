@@ -12,17 +12,21 @@ import org.apache.http.client.methods.HttpGet;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
 
+import java.awt.*;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static textProcess.ObjectEntriesFetcher.TargetType.CHUNK_ID;
 import static textProcess.ObjectEntriesFetcher.TargetType.OBJECT_ID;
 
@@ -78,33 +82,60 @@ public class ObjectEntriesFetcher {
     private static String urlPrefix = "http://" + host + ":9101/";
     private static String urlSuffix = "";
 
-    public static void main(String[] args) throws Exception{
-        sdf.setTimeZone(TimeZone.getTimeZone("GMT+0:00"));
-        long start = System.currentTimeMillis();
-        System.out.println("===========================");
-        System.out.printf("host:%s\n", host);
-        prepare();
-        if(majorStart == -1 || majorEnd == -1){
-            System.out.println("Finished: can't find JOURNAL_REGION from " + properties.getProperty("startTime") + " to " + properties.getProperty("stopTime"));
+    public static void main(String[] args) {
+        try {
+            sdf.setTimeZone(TimeZone.getTimeZone("GMT+0:00"));
+            long start = System.currentTimeMillis();
+            System.out.println("===========================");
+            System.out.printf("host:%s\n", host);
+            prepare();
+            if (majorStart == -1 || majorEnd == -1) {
+                System.out.println("Finished: can't find JOURNAL_REGION from " + properties.getProperty("startTime") + " to " + properties.getProperty("stopTime"));
+                return;
+            }
+            System.out.printf("majorStart:%s\n", majorStart);
+            System.out.printf("majorEnd:%s\n", majorEnd);
+            System.out.printf("baseUrl:%s\n", baseUrl);
+            System.out.println("===========================");
+            for (int major = majorStart; major <= majorEnd; major++) {
+                requestPool.execute(new RequestTask(major, "0-0"));
+            }
+            while (currentTaskNum.get() > 0) {
+                Thread.sleep(3000);
+            }
+            requestPool.shutdown();
+            parserPool.shutdown();
+            PerformanceCounter.StartTime beforeMerge = PerformanceCounter.start();
+            mergeFile();
+            mergeCounter.count(beforeMerge);
+            PerformanceCounter.printAll();
+            System.out.println("Finished with totalTime:" + (System.currentTimeMillis() - start) + "ms");
+        } catch (Exception e){
+            System.out.println("Hit exception " + e + "\n" + e.getCause());
+            e.printStackTrace();
+        }
+        postFinished();
+    }
+
+    static void postFinished(){
+        if(!System.getProperty("os.name").contains("Windows")){
             return;
         }
-        System.out.printf("majorStart:%s\n", majorStart);
-        System.out.printf("majorEnd:%s\n", majorEnd);
-        System.out.printf("baseUrl:%s\n", baseUrl);
-        System.out.println("===========================");
-        for (int major = majorStart; major <= majorEnd; major++) {
-            requestPool.execute(new RequestTask(major, "0-0"));
+        //Obtain only one instance of the SystemTray object
+        SystemTray tray = SystemTray.getSystemTray();
+        Image image = Toolkit.getDefaultToolkit().createImage("icon.png");
+        TrayIcon trayIcon = new TrayIcon(image,"JournalFetcher");
+        //Let the system resize the image if needed
+        trayIcon.setImageAutoSize(true);
+        //Set tooltip text for the tray icon
+        trayIcon.setToolTip("JournalFetcher");
+        try {
+            tray.add(trayIcon);
+        } catch (AWTException e){
+            System.out.println("postFinished AWTException:" + e.getMessage());
         }
-        while(currentTaskNum.get() > 0){
-            Thread.sleep(3000);
-        }
-        requestPool.shutdown();
-        parserPool.shutdown();
-        PerformanceCounter.StartTime beforeMerge = PerformanceCounter.start();
-        mergeFile();
-        mergeCounter.count(beforeMerge);
-        PerformanceCounter.printAll();
-        System.out.println("Finished with totalTime:" + (System.currentTimeMillis() - start) + "ms");
+        trayIcon.displayMessage("JournalFetcher finished", "JournalFetcher finished", TrayIcon.MessageType.INFO);
+        tray.remove(trayIcon);
     }
 
     static void prepare() throws Exception {
@@ -132,16 +163,21 @@ public class ObjectEntriesFetcher {
 
         HttpGet httpGet = new HttpGet(urlPrefix);
         httpGet.setConfig(requestConfig);
-        boolean needProxy = client.execute(httpGet, rep -> {
-            try{
-                if (rep.getStatusLine().getStatusCode() >= 300) {
+        boolean needProxy = true;
+        try {
+            client.execute(httpGet, rep -> {
+                try {
+                    if (rep.getStatusLine().getStatusCode() >= 300) {
+                        return true;
+                    }
+                    return false;
+                } catch (Exception e) {
                     return true;
                 }
-                return false;
-            } catch(Exception e){
-                return true;
-            }
-        });
+            });
+        } catch (Exception e){
+            System.out.println("ignore httpclient error");
+        }
         if(needProxy){
             urlPrefix = "http://10.247.99.224:8881/proxy/";
             urlSuffix = "&host="+host;
@@ -165,19 +201,23 @@ public class ObjectEntriesFetcher {
             if(url == null){
                 return;
             }
-            dtId = url.split(urlPrefix.split(":")[2])[1].split("/")[0];
+            dtId = url.substring(url.indexOf("urn")).split("/")[0];
         }
         dtId = dtId.trim();
 
         // get zone
-        httpGet = buildHttpGet("diagnostic/getVdcFromNode?nodeId=" + host);
-        String zone =  client.execute(httpGet, rep -> {
-            BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(rep.getEntity().getContent()));
-            return bufferedReader.readLine();
-        });
+        String zone = properties.getProperty("zone");
+        if(StringUtils.isEmpty(zone)){
+            httpGet = buildHttpGet("diagnostic/getVdcFromNode?nodeId=" + host);
+            zone =  client.execute(httpGet, rep -> {
+                BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(rep.getEntity().getContent()));
+                return bufferedReader.readLine();
+            });
+        }
         // get journal region major
         httpGet = buildHttpGet("diagnostic/PR/1/DumpAllKeys/DIRECTORYTABLE_RECORD?showvalue=gpb&type=JOURNAL_REGION&dtId=" + dtId + "&zone=" + zone);
-        String urlContent = findUrl(httpGet).split(urlPrefix.split(":")[2])[1].split("\">")[0];
+        String urlContent = findUrl(httpGet);
+        urlContent = urlContent.substring(urlContent.indexOf("urn"), urlContent.indexOf("=gpb")+4);
         httpGet = new HttpGet("http://10.247.99.224:8881/proxy/" + urlContent + "&host=" + host);
         httpGet.setConfig(requestConfig);
         httpGet = buildHttpGet(urlContent);
@@ -262,6 +302,11 @@ public class ObjectEntriesFetcher {
                         originalTargetLogChannel.close();
                     }
                 }
+            }
+            File desktopDir = new File("C:/Users/wup10/Desktop");
+            if(desktopDir.exists()){
+                Files.copy(new File(targetLog).toPath(),
+                        new File(desktopDir.getAbsolutePath()+ "/target.log").toPath(), REPLACE_EXISTING);
             }
         } finally{
             targetLogChannel.close();

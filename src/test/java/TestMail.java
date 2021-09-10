@@ -1,8 +1,10 @@
 import org.junit.Test;
 
-public class TestMail {
-    @Test
-    public void testSendMail(){
+import java.awt.*;
+import java.awt.TrayIcon.MessageType;
 
+public class TestMail {
+    public static void main(String[] args) throws AWTException {
     }
+
 }
